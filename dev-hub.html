@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LampShop — локальная разработка</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #1a1a1a; }
+    h1 { font-size: 1.35rem; }
+    a { color: #0b57d0; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem 1.25rem; margin: 1rem 0; background: #fafafa; }
+    code, pre { background: #eee; padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.9em; }
+    pre { padding: 0.75rem; overflow-x: auto; }
+    ul { margin: 0.5rem 0; }
+  </style>
+</head>
+<body>
+  <h1>LampShop — микросервисы</h1>
+  <p>Учебный пример на порту <strong>8000</strong> с путём <code>/items</code> — это другой проект. Здесь каталог и заказы разнесены по ТЗ:</p>
+
+  <div class="card">
+    <strong>Product Service (порт 3001)</strong>
+    <ul>
+      <li><a href="http://127.0.0.1:3001/docs">Swagger UI — /docs</a></li>
+      <li><a href="http://127.0.0.1:3001/redoc">ReDoc</a></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <strong>Order Service (порт 3002)</strong>
+    <ul>
+      <li><a href="http://127.0.0.1:3002/docs">Swagger UI — /docs</a> (сначала <strong>Authorize</strong> → <code>X-Session-Id</code>)</li>
+      <li><a href="http://127.0.0.1:3002/redoc">ReDoc</a></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <strong>Быстрый старт</strong>
+    <ol>
+      <li>В каталоге <code>product-service</code>: <code>python -m app.seed</code> (один раз, чтобы были 20 товаров).</li>
+      <li>Запустите оба сервиса (см. <code>run-dev.ps1</code> в корне репозитория) или вручную:
+        <pre>cd product-service
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 3001</pre>
+        <pre>cd order-service
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 3002</pre>
+      </li>
+      <li>В Order Service Swagger: Authorize → введите UUID сессии, скопируйте <code>id</code> товара из Product Service → <code>POST /api/v1/cart/items</code> → <code>POST /api/v1/orders</code>.</li>
+    </ol>
+  </div>
+
+  <p>Коллекция Postman: <code>LampShop_API_Postman.json</code> в корне проекта.</p>
+</body>
+</html>

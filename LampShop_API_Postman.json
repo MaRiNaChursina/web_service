@@ -1,0 +1,587 @@
+{
+  "info": {
+    "name": "LampShop — Интернет-магазин лампочек",
+    "description": "API документация для трёх микросервисов интернет-магазина завода лампочек.\n\n**Product Service** — порт 3001 — управление товарами и категориями\n**Order Service** — порт 3002 — корзина, заказы, аутентификация\n**Admin Service** — порт 3003 — панель управления",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "lampshop-api-v1"
+  },
+  "variable": [
+    { "key": "product_url", "value": "http://localhost:3001", "type": "string" },
+    { "key": "order_url", "value": "http://localhost:3002", "type": "string" },
+    { "key": "admin_url", "value": "http://localhost:3003", "type": "string" },
+    { "key": "token", "value": "", "type": "string" },
+    { "key": "admin_token", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "🔧 Product Service (port 3001)",
+      "item": [
+        {
+          "name": "Каталог товаров",
+          "item": [
+            {
+              "name": "Получить список товаров",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{product_url}}/api/v1/products?page=1&limit=20",
+                  "host": ["{{product_url}}"],
+                  "path": ["api", "v1", "products"],
+                  "query": [
+                    { "key": "page", "value": "1" },
+                    { "key": "limit", "value": "20" },
+                    { "key": "category_id", "value": "", "disabled": true },
+                    { "key": "sort", "value": "price_asc", "disabled": true },
+                    { "key": "q", "value": "", "disabled": true, "description": "Поиск по названию" }
+                  ]
+                },
+                "description": "Возвращает пагинированный список активных товаров. Поддерживает фильтрацию по категории и сортировку."
+              },
+              "response": [
+                {
+                  "name": "200 OK — Список товаров",
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"data\": [\n    {\n      \"id\": \"550e8400-e29b-41d4-a716-446655440001\",\n      \"name\": \"Лампочка LED E27 10W тёплый белый\",\n      \"slug\": \"led-e27-10w-ww\",\n      \"price\": 149.90,\n      \"sku\": \"LED-E27-10W-WW\",\n      \"stock_quantity\": 250,\n      \"power_watts\": 10,\n      \"base_type\": \"E27\",\n      \"color_temp_k\": 2700,\n      \"category\": {\n        \"id\": \"cat-uuid-001\",\n        \"name\": \"LED лампы\"\n      },\n      \"primary_image\": \"https://cdn.lampshop.ru/img/led-e27-10w.jpg\"\n    }\n  ],\n  \"pagination\": {\n    \"page\": 1,\n    \"limit\": 20,\n    \"total\": 20,\n    \"total_pages\": 1\n  }\n}"
+                }
+              ]
+            },
+            {
+              "name": "Получить товар по ID",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{product_url}}/api/v1/products/550e8400-e29b-41d4-a716-446655440001",
+                  "host": ["{{product_url}}"],
+                  "path": ["api", "v1", "products", "550e8400-e29b-41d4-a716-446655440001"]
+                }
+              },
+              "response": [
+                {
+                  "name": "200 OK",
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"id\": \"550e8400-e29b-41d4-a716-446655440001\",\n  \"name\": \"Лампочка LED E27 10W тёплый белый\",\n  \"description\": \"Светодиодная лампочка мощностью 10 Вт с цоколем E27. Цветовая температура 2700K (тёплый белый).\",\n  \"price\": 149.90,\n  \"sku\": \"LED-E27-10W-WW\",\n  \"stock_quantity\": 250,\n  \"power_watts\": 10,\n  \"base_type\": \"E27\",\n  \"color_temp_k\": 2700,\n  \"category\": { \"id\": \"cat-uuid-001\", \"name\": \"LED лампы\", \"slug\": \"led\" },\n  \"images\": [\n    { \"url\": \"https://cdn.lampshop.ru/img/led-e27-10w.jpg\", \"is_primary\": true }\n  ]\n}"
+                },
+                {
+                  "name": "404 Not Found",
+                  "status": "Not Found",
+                  "code": 404,
+                  "body": "{\n  \"error\": {\n    \"code\": \"PRODUCT_NOT_FOUND\",\n    \"message\": \"Товар с указанным ID не найден\",\n    \"status\": 404\n  }\n}"
+                }
+              ]
+            },
+            {
+              "name": "Создать товар (Admin)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{admin_token}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"category_id\": \"cat-uuid-001\",\n  \"name\": \"Лампочка LED GU10 7W дневной свет\",\n  \"slug\": \"led-gu10-7w-dl\",\n  \"description\": \"Светодиодная лампочка GU10 7Вт для точечных светильников.\",\n  \"price\": 189.00,\n  \"sku\": \"LED-GU10-7W-DL\",\n  \"stock_quantity\": 100,\n  \"power_watts\": 7,\n  \"base_type\": \"GU10\",\n  \"color_temp_k\": 4000\n}"
+                },
+                "url": {
+                  "raw": "{{product_url}}/api/v1/products",
+                  "host": ["{{product_url}}"],
+                  "path": ["api", "v1", "products"]
+                }
+              },
+              "response": [
+                {
+                  "name": "201 Created",
+                  "status": "Created",
+                  "code": 201,
+                  "body": "{\n  \"id\": \"new-uuid-here\",\n  \"name\": \"Лампочка LED GU10 7W дневной свет\",\n  \"price\": 189.00,\n  \"sku\": \"LED-GU10-7W-DL\",\n  \"is_active\": true,\n  \"created_at\": \"2025-01-15T10:00:00Z\"\n}"
+                }
+              ]
+            },
+            {
+              "name": "Обновить остаток товара (Admin)",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{admin_token}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"stock_quantity\": 500\n}"
+                },
+                "url": {
+                  "raw": "{{product_url}}/api/v1/products/550e8400-e29b-41d4-a716-446655440001/stock",
+                  "host": ["{{product_url}}"],
+                  "path": ["api", "v1", "products", "550e8400-e29b-41d4-a716-446655440001", "stock"]
+                }
+              }
+            },
+            {
+              "name": "Удалить товар (Admin)",
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  { "key": "Authorization", "value": "Bearer {{admin_token}}" }
+                ],
+                "url": {
+                  "raw": "{{product_url}}/api/v1/products/550e8400-e29b-41d4-a716-446655440001",
+                  "host": ["{{product_url}}"],
+                  "path": ["api", "v1", "products", "550e8400-e29b-41d4-a716-446655440001"]
+                }
+              },
+              "response": [
+                {
+                  "name": "204 No Content",
+                  "status": "No Content",
+                  "code": 204,
+                  "body": ""
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Категории",
+          "item": [
+            {
+              "name": "Получить список категорий",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{product_url}}/api/v1/categories",
+                  "host": ["{{product_url}}"],
+                  "path": ["api", "v1", "categories"]
+                }
+              },
+              "response": [
+                {
+                  "name": "200 OK",
+                  "status": "OK",
+                  "code": 200,
+                  "body": "[\n  { \"id\": \"cat-uuid-001\", \"name\": \"LED лампы\", \"slug\": \"led\", \"product_count\": 12 },\n  { \"id\": \"cat-uuid-002\", \"name\": \"Накаливания\", \"slug\": \"incandescent\", \"product_count\": 2 },\n  { \"id\": \"cat-uuid-003\", \"name\": \"Галогенные\", \"slug\": \"halogen\", \"product_count\": 2 },\n  { \"id\": \"cat-uuid-004\", \"name\": \"Умные лампы\", \"slug\": \"smart\", \"product_count\": 2 }\n]"
+                }
+              ]
+            },
+            {
+              "name": "Создать категорию (Admin)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{admin_token}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Для растений\",\n  \"slug\": \"plant\",\n  \"description\": \"Лампы для выращивания растений\"\n}"
+                },
+                "url": {
+                  "raw": "{{product_url}}/api/v1/categories",
+                  "host": ["{{product_url}}"],
+                  "path": ["api", "v1", "categories"]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "🛒 Order Service (port 3002)",
+      "item": [
+        {
+          "name": "Аутентификация",
+          "item": [
+            {
+              "name": "Регистрация",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": ["const r = pm.response.json();", "if (r.token) pm.collectionVariables.set('token', r.token);"]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"user@example.com\",\n  \"password\": \"SecurePass123!\",\n  \"first_name\": \"Иван\",\n  \"last_name\": \"Иванов\",\n  \"phone\": \"+79001234567\"\n}"
+                },
+                "url": {
+                  "raw": "{{order_url}}/api/v1/auth/register",
+                  "host": ["{{order_url}}"],
+                  "path": ["api", "v1", "auth", "register"]
+                }
+              },
+              "response": [
+                {
+                  "name": "201 Created",
+                  "status": "Created",
+                  "code": 201,
+                  "body": "{\n  \"user\": {\n    \"id\": \"user-uuid\",\n    \"email\": \"user@example.com\",\n    \"first_name\": \"Иван\",\n    \"role\": \"customer\"\n  },\n  \"token\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\"\n}"
+                }
+              ]
+            },
+            {
+              "name": "Вход",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": ["const r = pm.response.json();", "if (r.token) pm.collectionVariables.set('token', r.token);"]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"user@example.com\",\n  \"password\": \"SecurePass123!\"\n}"
+                },
+                "url": {
+                  "raw": "{{order_url}}/api/v1/auth/login",
+                  "host": ["{{order_url}}"],
+                  "path": ["api", "v1", "auth", "login"]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Корзина",
+          "item": [
+            {
+              "name": "Получить корзину",
+              "request": {
+                "method": "GET",
+                "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+                "url": {
+                  "raw": "{{order_url}}/api/v1/cart",
+                  "host": ["{{order_url}}"],
+                  "path": ["api", "v1", "cart"]
+                }
+              },
+              "response": [
+                {
+                  "name": "200 OK",
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"id\": \"cart-uuid\",\n  \"items\": [\n    {\n      \"id\": \"cart-item-uuid\",\n      \"product_id\": \"550e8400-e29b-41d4-a716-446655440001\",\n      \"product_name\": \"Лампочка LED E27 10W тёплый белый\",\n      \"quantity\": 10,\n      \"unit_price\": 149.90,\n      \"subtotal\": 1499.00\n    }\n  ],\n  \"total\": 1499.00,\n  \"items_count\": 10\n}"
+                }
+              ]
+            },
+            {
+              "name": "Добавить товар в корзину",
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{token}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"product_id\": \"550e8400-e29b-41d4-a716-446655440001\",\n  \"quantity\": 5\n}"
+                },
+                "url": {
+                  "raw": "{{order_url}}/api/v1/cart/items",
+                  "host": ["{{order_url}}"],
+                  "path": ["api", "v1", "cart", "items"]
+                }
+              }
+            },
+            {
+              "name": "Изменить количество",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{token}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"quantity\": 3\n}"
+                },
+                "url": {
+                  "raw": "{{order_url}}/api/v1/cart/items/cart-item-uuid",
+                  "host": ["{{order_url}}"],
+                  "path": ["api", "v1", "cart", "items", "cart-item-uuid"]
+                }
+              }
+            },
+            {
+              "name": "Удалить позицию из корзины",
+              "request": {
+                "method": "DELETE",
+                "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+                "url": {
+                  "raw": "{{order_url}}/api/v1/cart/items/cart-item-uuid",
+                  "host": ["{{order_url}}"],
+                  "path": ["api", "v1", "cart", "items", "cart-item-uuid"]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Заказы",
+          "item": [
+            {
+              "name": "Создать заказ",
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{token}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"delivery_address\": {\n    \"city\": \"Москва\",\n    \"street\": \"ул. Ленина\",\n    \"building\": \"1\",\n    \"apartment\": \"10\",\n    \"postal_code\": \"101000\"\n  },\n  \"payment_method\": \"card\",\n  \"notes\": \"Позвонить за час до доставки\"\n}"
+                },
+                "url": {
+                  "raw": "{{order_url}}/api/v1/orders",
+                  "host": ["{{order_url}}"],
+                  "path": ["api", "v1", "orders"]
+                }
+              },
+              "response": [
+                {
+                  "name": "201 Created",
+                  "status": "Created",
+                  "code": 201,
+                  "body": "{\n  \"id\": \"order-uuid\",\n  \"order_number\": \"ORD-2025-0042\",\n  \"status\": \"pending\",\n  \"total_amount\": 2997.00,\n  \"delivery_address\": {\n    \"city\": \"Москва\",\n    \"street\": \"ул. Ленина\",\n    \"building\": \"1\",\n    \"apartment\": \"10\",\n    \"postal_code\": \"101000\"\n  },\n  \"items\": [\n    {\n      \"product_name\": \"Лампочка LED E27 10W тёплый белый\",\n      \"quantity\": 10,\n      \"unit_price\": 149.90,\n      \"total_price\": 1499.00\n    },\n    {\n      \"product_name\": \"Лампочка LED GU10 7W дневной свет\",\n      \"quantity\": 8,\n      \"unit_price\": 189.00,\n      \"total_price\": 1512.00\n    }\n  ],\n  \"created_at\": \"2025-01-15T14:30:00Z\"\n}"
+                },
+                {
+                  "name": "422 Insufficient Stock",
+                  "status": "Unprocessable Entity",
+                  "code": 422,
+                  "body": "{\n  \"error\": {\n    \"code\": \"INSUFFICIENT_STOCK\",\n    \"message\": \"Недостаточно товара на складе\",\n    \"details\": {\n      \"product_id\": \"uuid\",\n      \"product_name\": \"Лампочка LED E27 10W\",\n      \"requested\": 50,\n      \"available\": 30\n    }\n  }\n}"
+                }
+              ]
+            },
+            {
+              "name": "Список моих заказов",
+              "request": {
+                "method": "GET",
+                "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+                "url": {
+                  "raw": "{{order_url}}/api/v1/orders?page=1&limit=10",
+                  "host": ["{{order_url}}"],
+                  "path": ["api", "v1", "orders"],
+                  "query": [
+                    { "key": "page", "value": "1" },
+                    { "key": "limit", "value": "10" }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "Отменить заказ",
+              "request": {
+                "method": "PATCH",
+                "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+                "url": {
+                  "raw": "{{order_url}}/api/v1/orders/order-uuid/cancel",
+                  "host": ["{{order_url}}"],
+                  "path": ["api", "v1", "orders", "order-uuid", "cancel"]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "⚙️ Admin Service (port 3003)",
+      "item": [
+        {
+          "name": "Авторизация",
+          "item": [
+            {
+              "name": "Вход в админку",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": ["const r = pm.response.json();", "if (r.token) pm.collectionVariables.set('admin_token', r.token);"]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"admin@lampshop.ru\",\n  \"password\": \"AdminSecurePass!\"\n}"
+                },
+                "url": {
+                  "raw": "{{admin_url}}/api/v1/admin/auth/login",
+                  "host": ["{{admin_url}}"],
+                  "path": ["api", "v1", "admin", "auth", "login"]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Dashboard",
+          "item": [
+            {
+              "name": "Сводная статистика",
+              "request": {
+                "method": "GET",
+                "header": [{ "key": "Authorization", "value": "Bearer {{admin_token}}" }],
+                "url": {
+                  "raw": "{{admin_url}}/api/v1/admin/dashboard",
+                  "host": ["{{admin_url}}"],
+                  "path": ["api", "v1", "admin", "dashboard"]
+                }
+              },
+              "response": [
+                {
+                  "name": "200 OK",
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"total_products\": 20,\n  \"active_products\": 18,\n  \"total_orders\": 142,\n  \"orders_today\": 7,\n  \"revenue_month\": 45820.50,\n  \"orders_by_status\": {\n    \"pending\": 3,\n    \"confirmed\": 4,\n    \"processing\": 2,\n    \"shipped\": 5,\n    \"delivered\": 128,\n    \"cancelled\": 0\n  },\n  \"low_stock_products\": [\n    {\n      \"id\": \"uuid\",\n      \"name\": \"Лампочка накаливания E27 40W\",\n      \"stock_quantity\": 5,\n      \"sku\": \"INCAND-E27-40W\"\n    }\n  ]\n}"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Управление заказами",
+          "item": [
+            {
+              "name": "Список всех заказов",
+              "request": {
+                "method": "GET",
+                "header": [{ "key": "Authorization", "value": "Bearer {{admin_token}}" }],
+                "url": {
+                  "raw": "{{admin_url}}/api/v1/admin/orders?status=pending&page=1",
+                  "host": ["{{admin_url}}"],
+                  "path": ["api", "v1", "admin", "orders"],
+                  "query": [
+                    { "key": "status", "value": "pending", "description": "Фильтр по статусу" },
+                    { "key": "page", "value": "1" },
+                    { "key": "limit", "value": "20", "disabled": true },
+                    { "key": "date_from", "value": "2025-01-01", "disabled": true },
+                    { "key": "date_to", "value": "2025-12-31", "disabled": true }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "Изменить статус заказа",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{admin_token}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"confirmed\",\n  \"comment\": \"Оплата подтверждена, заказ принят в работу\"\n}"
+                },
+                "url": {
+                  "raw": "{{admin_url}}/api/v1/admin/orders/order-uuid/status",
+                  "host": ["{{admin_url}}"],
+                  "path": ["api", "v1", "admin", "orders", "order-uuid", "status"]
+                }
+              },
+              "response": [
+                {
+                  "name": "200 OK",
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"id\": \"order-uuid\",\n  \"order_number\": \"ORD-2025-0042\",\n  \"status\": \"confirmed\",\n  \"status_history\": [\n    {\n      \"old_status\": \"pending\",\n      \"new_status\": \"confirmed\",\n      \"changed_by\": \"admin-uuid\",\n      \"comment\": \"Оплата подтверждена, заказ принят в работу\",\n      \"created_at\": \"2025-01-15T10:30:00Z\"\n    }\n  ]\n}"
+                },
+                {
+                  "name": "400 Invalid Transition",
+                  "status": "Bad Request",
+                  "code": 400,
+                  "body": "{\n  \"error\": {\n    \"code\": \"INVALID_STATUS_TRANSITION\",\n    \"message\": \"Нельзя перейти из статуса 'delivered' в 'pending'\",\n    \"status\": 400\n  }\n}"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Управление пользователями",
+          "item": [
+            {
+              "name": "Список пользователей",
+              "request": {
+                "method": "GET",
+                "header": [{ "key": "Authorization", "value": "Bearer {{admin_token}}" }],
+                "url": {
+                  "raw": "{{admin_url}}/api/v1/admin/users?page=1&limit=20",
+                  "host": ["{{admin_url}}"],
+                  "path": ["api", "v1", "admin", "users"],
+                  "query": [
+                    { "key": "page", "value": "1" },
+                    { "key": "limit", "value": "20" },
+                    { "key": "q", "value": "", "disabled": true, "description": "Поиск по email или имени" }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "Заблокировать пользователя",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{admin_token}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"blocked\": true,\n  \"reason\": \"Подозрительная активность\"\n}"
+                },
+                "url": {
+                  "raw": "{{admin_url}}/api/v1/admin/users/user-uuid/block",
+                  "host": ["{{admin_url}}"],
+                  "path": ["api", "v1", "admin", "users", "user-uuid", "block"]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Журнал аудита",
+          "item": [
+            {
+              "name": "Просмотр журнала действий",
+              "request": {
+                "method": "GET",
+                "header": [{ "key": "Authorization", "value": "Bearer {{admin_token}}" }],
+                "url": {
+                  "raw": "{{admin_url}}/api/v1/admin/audit-log?page=1&entity_type=order",
+                  "host": ["{{admin_url}}"],
+                  "path": ["api", "v1", "admin", "audit-log"],
+                  "query": [
+                    { "key": "page", "value": "1" },
+                    { "key": "entity_type", "value": "order", "description": "product | order | user" },
+                    { "key": "admin_id", "value": "", "disabled": true }
+                  ]
+                }
+              },
+              "response": [
+                {
+                  "name": "200 OK",
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"data\": [\n    {\n      \"id\": 1042,\n      \"admin\": { \"id\": \"admin-uuid\", \"full_name\": \"Петров Сергей\" },\n      \"action\": \"UPDATE\",\n      \"entity_type\": \"order\",\n      \"entity_id\": \"order-uuid\",\n      \"changes\": {\n        \"before\": { \"status\": \"pending\" },\n        \"after\": { \"status\": \"confirmed\" }\n      },\n      \"ip_address\": \"192.168.1.10\",\n      \"created_at\": \"2025-01-15T10:30:00Z\"\n    }\n  ],\n  \"pagination\": { \"page\": 1, \"total\": 1042 }\n}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
