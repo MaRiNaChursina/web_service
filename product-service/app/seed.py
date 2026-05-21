@@ -95,7 +95,7 @@ def run() -> None:
             db.add(
                 ProductImage(
                     product_id=first.id,
-                    url="https://cdn.lampshop.ru/img/led-e27-10w.jpg",
+                    url="https://placehold.co/400x400/e8edf2/64748b?text=LED+E27",
                     alt_text="LED E27 10W тёплый белый",
                     is_primary=True,
                     sort_order=0,

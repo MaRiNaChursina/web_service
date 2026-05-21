@@ -1,0 +1,4 @@
+# Все микросервисы одной командой (опционально; удобнее — отдельный .venv в каждом каталоге сервиса).
+-r order-service/requirements.txt
+-r product-service/requirements.txt
+-r admin-service/requirements.txt

@@ -31,19 +31,34 @@
     <ul>
       <li><a href="http://127.0.0.1:3002/docs">Swagger UI — /docs</a> (сначала <strong>Authorize</strong> → <code>X-Session-Id</code>)</li>
       <li><a href="http://127.0.0.1:3002/redoc">ReDoc</a></li>
+      <li>Покупатель: <code>POST /api/v1/auth/register</code> и <code>POST /api/v1/auth/login</code> (email + пароль). Демо-покупатель при старте (если записи ещё нет): <code>customer@example.com</code> / <code>User123!</code>.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <strong>Admin Service (порт 3003)</strong> — панель управления по ТЗ: JWT, прокси к Product/Order, журнал аудита.
+    <ul>
+      <li><a href="http://127.0.0.1:3003/docs">Swagger UI — /docs</a></li>
+      <li><a href="http://127.0.0.1:3003/redoc">ReDoc</a></li>
+      <li>Вход: <code>POST /api/v1/admin/auth/login</code> (email + пароль). Дефолт после первого запуска: <code>admin@lampshop.local</code> / <code>Admin123!</code> (см. переменные <code>ADMIN_BOOTSTRAP_*</code>).</li>
+      <li>Фронтенд: меню <strong>профиля</strong> → «Аккаунт»: одна форма входа — сначала проверяется admin-service, затем order-service; при успехе админа открывается <code>/admin</code>. Прокси Vite: <code>/admin-service</code> → 3003, <code>/order-service</code> → 3002.</li>
     </ul>
   </div>
 
   <div class="card">
     <strong>Быстрый старт</strong>
     <ol>
+      <li>В каждом сервисе один раз установите зависимости (из каталога сервиса): <code>pip install -r requirements.txt</code> — нужны пакеты <strong>PyJWT</strong> и <strong>bcrypt</strong> (импорты <code>jwt</code> и <code>bcrypt</code>).</li>
       <li>В каталоге <code>product-service</code>: <code>python -m app.seed</code> (один раз, чтобы были 20 товаров).</li>
-      <li>Запустите оба сервиса (см. <code>run-dev.ps1</code> в корне репозитория) или вручную:
+      <li>Запустите <strong>три</strong> сервиса (см. <code>run-dev.ps1</code> в корне репозитория) или вручную:
         <pre>cd product-service
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 3001</pre>
         <pre>cd order-service
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 3002</pre>
+        <pre>cd admin-service
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 3003</pre>
       </li>
+      <li>Для админ-JWT задайте одинаковый <code>JWT_SECRET</code> в окружении для <code>product-service</code>, <code>order-service</code> и <code>admin-service</code> (или оставьте дефолт только для локальной отладки).</li>
       <li>В Order Service Swagger: Authorize → введите UUID сессии, скопируйте <code>id</code> товара из Product Service → <code>POST /api/v1/cart/items</code> → <code>POST /api/v1/orders</code>.</li>
     </ol>
   </div>

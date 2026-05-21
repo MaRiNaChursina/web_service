@@ -1,20 +1,81 @@
+import csv
+import io
 import json
 import os
 from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any, Optional
 
+import bcrypt
 import httpx
-from fastapi import Depends, FastAPI, Query, Request
-from fastapi.responses import JSONResponse, Response
+import jwt
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import APIKeyHeader
-from sqlalchemy import func
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import exists, func, or_
 from sqlalchemy.orm import Session, selectinload
 
 from .database import Base, SessionLocal, engine
-from .models import Cart, CartItem, Order, OrderItem
-from .schemas import CartItemAdd, CartItemQuantity, OrderCreate
+from .models import Cart, CartItem, Order, OrderItem, User
+from .schemas import CartItemAdd, CartItemQuantity, CartMergeRequest, CustomerLogin, CustomerRegister, OrderCreate
 
 PRODUCT_URL = os.getenv("PRODUCT_SERVICE_URL", "http://localhost:3001").rstrip("/")
+JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-prod")
+JWT_ALGORITHM = "HS256"
+ACCESS_MINUTES = int(os.getenv("JWT_ACCESS_EXPIRES_MINUTES", "60"))
+REFRESH_DAYS = int(os.getenv("JWT_REFRESH_EXPIRES_DAYS", "30"))
+
+ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
+    "pending": {"confirmed", "cancelled"},
+    "confirmed": {"processing", "cancelled"},
+    "processing": {"shipped", "cancelled"},
+    "shipped": {"delivered"},
+    "delivered": set(),
+    "cancelled": set(),
+}
+
+ORDER_STATUS_RU: dict[str, str] = {
+    "pending": "Новый",
+    "confirmed": "Подтверждён",
+    "processing": "В обработке",
+    "shipped": "Отправлен",
+    "delivered": "Доставлен",
+    "cancelled": "Отменён",
+}
+
+PAYMENT_METHOD_RU: dict[str, str] = {
+    "sbp": "СБП",
+    "card": "Карта",
+    "cash": "Наличные",
+}
+
+PAYMENT_STATUS_RU: dict[str, str] = {
+    "unpaid": "Не оплачен",
+    "paid": "Оплачен",
+    "refunded": "Возврат средств",
+}
+
+
+def _ru_order_status(code: Optional[str]) -> str:
+    if not code:
+        return "—"
+    c = str(code).strip().lower()
+    return ORDER_STATUS_RU.get(c, str(code))
+
+
+def _ru_payment_method(code: Optional[str]) -> str:
+    if not code:
+        return "—"
+    c = str(code).strip().lower()
+    return PAYMENT_METHOD_RU.get(c, str(code))
+
+
+def _ru_payment_status(code: Optional[str]) -> str:
+    if not code:
+        return "—"
+    c = str(code).strip().lower()
+    return PAYMENT_STATUS_RU.get(c, str(code))
 
 session_api = APIKeyHeader(
     name="X-Session-Id",
@@ -23,10 +84,69 @@ session_api = APIKeyHeader(
 )
 
 
+def _ensure_demo_customer(
+    db: Session,
+    *,
+    email: str,
+    password: str,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+    phone: Optional[str] = None,
+) -> None:
+    """Создаёт тестового покупателя, если такого email ещё нет (удобно для локальной демо)."""
+    normalized = email.strip().lower()
+    if db.query(User).filter(User.email == normalized).first():
+        return
+    pwd_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
+    db.add(
+        User(
+            email=normalized,
+            password_hash=pwd_hash,
+            first_name=first_name,
+            last_name=last_name,
+            phone=phone,
+            role="customer",
+            is_blocked=False,
+        )
+    )
+    db.commit()
+
+
+def _ensure_orders_user_id_column() -> None:
+    """SQLite: добавить колонку user_id к orders, если её ещё нет (create_all не меняет существующие таблицы)."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    try:
+        cols = [c["name"] for c in insp.get_columns("orders")]
+    except Exception:
+        return
+    if "user_id" in cols:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE orders ADD COLUMN user_id VARCHAR"))
+    except Exception:
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.http = httpx.Client(timeout=30.0)
     Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    try:
+        _ensure_demo_customer(
+            db,
+            email="customer@example.com",
+            password="User123!",
+            first_name="Иван",
+            last_name="Покупатель",
+            phone="+79001234567",
+        )
+    finally:
+        db.close()
+    _ensure_orders_user_id_column()
     yield
     app.state.http.close()
 
@@ -56,8 +176,10 @@ app = FastAPI(
     ],
     openapi_tags=[
         {"name": "Meta", "description": "Служебные endpoint'ы"},
+        {"name": "Auth", "description": "Регистрация и вход покупателя"},
         {"name": "Cart", "description": "Корзина: просмотр, позиции, очистка"},
         {"name": "Orders", "description": "Оформление и просмотр заказов"},
+        {"name": "Admin", "description": "Администрирование пользователей и заказов (JWT администратора)"},
     ],
     swagger_ui_parameters={
         "tryItOutEnabled": True,
@@ -86,6 +208,7 @@ Http = Annotated[httpx.Client, Depends(get_http)]
 
 
 Sid = Annotated[Optional[str], Depends(session_api)]
+bearer_auth = HTTPBearer(auto_error=False)
 
 
 def _norm_session(raw: Optional[str]) -> Optional[str]:
@@ -100,6 +223,63 @@ def err(status: int, code: str, message: str, details: Any = None) -> JSONRespon
     if details is not None:
         body["error"]["details"] = details
     return JSONResponse(status_code=status, content=body)
+
+
+def service_admin_token() -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_MINUTES)
+    payload = {
+        "sub": "order-service",
+        "role": "admin",
+        "typ": "access",
+        "exp": expires_at,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def require_admin(credentials: HTTPAuthorizationCredentials = Depends(bearer_auth)) -> dict:
+    if not credentials or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
+    if payload.get("typ") == "refresh":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Access token required")
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+    return payload
+
+
+def optional_customer(
+    db: Db,
+    credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(bearer_auth)],
+) -> Optional[User]:
+    if not credentials or credentials.scheme.lower() != "bearer":
+        return None
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError:
+        return None
+    if payload.get("typ") == "refresh":
+        return None
+    if payload.get("role") != "customer":
+        return None
+    uid = str(payload.get("sub") or "").strip()
+    if not uid:
+        return None
+    u = db.query(User).filter(User.id == uid).first()
+    if not u or u.is_blocked:
+        return None
+    return u
+
+
+def require_customer_dep(customer: Annotated[Optional[User], Depends(optional_customer)]) -> User:
+    if not customer:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Требуется вход покупателя")
+    return customer
+
+
+CustomerUser = Annotated[User, Depends(require_customer_dep)]
 
 
 def get_or_create_cart(db: Session, session_id: str) -> Cart:
@@ -121,12 +301,21 @@ def fetch_product(http: httpx.Client, product_id: str) -> Optional[dict]:
 
 
 def patch_stock(http: httpx.Client, product_id: str, stock: int) -> None:
+    token = service_admin_token()
     r = http.patch(
         f"{PRODUCT_URL}/api/v1/products/{product_id}/stock",
         json={"stock_quantity": stock},
+        headers={"Authorization": f"Bearer {token}"},
     )
     if not r.is_success:
         raise RuntimeError(f"Stock update failed: {r.status_code} {r.text}")
+
+
+def restore_order_stock(http: httpx.Client, order: Order) -> None:
+    for i in order.items:
+        p = fetch_product(http, i.product_id)
+        cur = p["stock_quantity"] if p else 0
+        patch_stock(http, i.product_id, cur + i.quantity)
 
 
 def delivery_from_order(order: Order) -> Optional[dict]:
@@ -145,14 +334,20 @@ def delivery_from_order(order: Order) -> Optional[dict]:
     return None
 
 
-def format_order(order: Order) -> dict:
-    return {
+def format_order(db: Session, order: Order, *, admin: bool = False) -> dict:
+    cust: Optional[User] = None
+    if order.user_id:
+        cust = db.query(User).filter(User.id == order.user_id).first()
+    out: dict[str, Any] = {
         "id": order.id,
         "order_number": order.order_number,
         "status": order.status,
+        "status_label": _ru_order_status(order.status),
         "total_amount": order.total_amount,
         "payment_method": order.payment_method,
+        "payment_method_label": _ru_payment_method(order.payment_method),
         "payment_status": order.payment_status,
+        "payment_status_label": _ru_payment_status(order.payment_status),
         "notes": order.notes,
         "delivery_address": delivery_from_order(order),
         "items": [
@@ -169,6 +364,133 @@ def format_order(order: Order) -> dict:
         "created_at": order.created_at.isoformat() if order.created_at else None,
         "updated_at": order.updated_at.isoformat() if order.updated_at else None,
     }
+    if cust:
+        out["customer"] = {
+            "id": cust.id,
+            "email": cust.email,
+            "full_name": customer_display_name(cust),
+            "phone": cust.phone,
+        }
+    if admin:
+        out["session_id"] = order.session_id
+        if cust:
+            parts = [cust.email, customer_display_name(cust)]
+            out["buyer_summary"] = " · ".join(p for p in parts if p)
+        else:
+            out["buyer_summary"] = "Гость (без аккаунта)"
+    return out
+
+
+def format_user_row(u: User) -> dict:
+    return {
+        "id": u.id,
+        "email": u.email,
+        "first_name": u.first_name,
+        "last_name": u.last_name,
+        "phone": u.phone,
+        "role": u.role,
+        "is_blocked": u.is_blocked,
+        "created_at": u.created_at.isoformat() if u.created_at else None,
+    }
+
+
+def customer_display_name(u: User) -> str:
+    fn = (u.first_name or "").strip()
+    ln = (u.last_name or "").strip()
+    label = f"{fn} {ln}".strip()
+    return label or (u.email.split("@")[0] if u.email else "Покупатель")
+
+
+def customer_access_token(u: User) -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_MINUTES)
+    payload = {
+        "sub": u.id,
+        "email": u.email,
+        "role": "customer",
+        "typ": "access",
+        "exp": expires_at,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def customer_refresh_token(u: User) -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(days=REFRESH_DAYS)
+    payload = {
+        "sub": u.id,
+        "role": "customer",
+        "typ": "refresh",
+        "exp": expires_at,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def customer_auth_response(u: User) -> dict:
+    return {
+        "access_token": customer_access_token(u),
+        "refresh_token": customer_refresh_token(u),
+        "token_type": "bearer",
+        "expires_in": ACCESS_MINUTES * 60,
+        "email": u.email,
+        "display_name": customer_display_name(u),
+        "user_id": u.id,
+    }
+
+
+@app.post("/api/v1/auth/register", tags=["Auth"])
+def auth_register(body: CustomerRegister, db: Db):
+    email = body.email.strip().lower()
+    if db.query(User).filter(User.email == email).first():
+        return err(409, "EMAIL_EXISTS", "Этот email уже зарегистрирован")
+    fn = body.first_name.strip() if body.first_name and body.first_name.strip() else None
+    ln = body.last_name.strip() if body.last_name and body.last_name.strip() else None
+    pwd_hash = bcrypt.hashpw(body.password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
+    u = User(
+        email=email,
+        password_hash=pwd_hash,
+        first_name=fn,
+        last_name=ln,
+        role="customer",
+        is_blocked=False,
+    )
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+    return customer_auth_response(u)
+
+
+@app.post("/api/v1/auth/login", tags=["Auth"])
+def auth_login(body: CustomerLogin, db: Db):
+    email = body.email.strip().lower()
+    u = db.query(User).filter(User.email == email).first()
+    if not u or u.role != "customer":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Неверный email или пароль")
+    if u.is_blocked:
+        return err(403, "USER_BLOCKED", "Учётная запись заблокирована")
+    try:
+        ok = bcrypt.checkpw(body.password.encode("utf-8"), u.password_hash.encode("utf-8"))
+    except ValueError:
+        ok = False
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Неверный email или пароль")
+    return customer_auth_response(u)
+
+
+@app.post("/api/v1/auth/refresh", tags=["Auth"])
+def auth_refresh(body: dict, db: Db):
+    token = str(body.get("refresh_token") or "").strip()
+    if not token:
+        return err(400, "VALIDATION_ERROR", "Нужен refresh_token")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError:
+        return err(401, "UNAUTHORIZED", "Неверный refresh_token")
+    if payload.get("typ") != "refresh" or payload.get("role") != "customer":
+        return err(400, "VALIDATION_ERROR", "Ожидался refresh_token покупателя")
+    uid = str(payload.get("sub") or "").strip()
+    u = db.query(User).filter(User.id == uid).first()
+    if not u or u.is_blocked:
+        return err(401, "UNAUTHORIZED", "Пользователь не найден")
+    return customer_auth_response(u)
 
 
 @app.get("/", tags=["Meta"])
@@ -180,7 +502,7 @@ def root():
         "swagger_ui": "/docs",
         "redoc": "/redoc",
         "product_service": PRODUCT_URL,
-        "note": "В Swagger используйте Authorize → X-Session-Id (UUID).",
+        "note": "Корзина и заказы покупателя: Authorize → Bearer JWT (роль customer). Админ-заказы: admin JWT.",
     }
 
 
@@ -192,11 +514,9 @@ def favicon():
 @app.get("/api/v1/cart", tags=["Cart"])
 def cart_get(
     db: Db,
-    sid: Sid,
+    customer: CustomerUser,
 ):
-    session_id = _norm_session(sid)
-    if not session_id:
-        return err(400, "SESSION_REQUIRED", "Укажите заголовок X-Session-Id")
+    session_id = customer.id
     cart = get_or_create_cart(db, session_id)
     cart = db.query(Cart).options(selectinload(Cart.items)).filter(Cart.id == cart.id).first()
     items = []
@@ -218,10 +538,8 @@ def cart_get(
 
 
 @app.delete("/api/v1/cart", tags=["Cart"])
-def cart_clear(db: Db, sid: Sid):
-    session_id = _norm_session(sid)
-    if not session_id:
-        return err(400, "SESSION_REQUIRED", "Укажите заголовок X-Session-Id")
+def cart_clear(db: Db, customer: CustomerUser):
+    session_id = customer.id
     cart = get_or_create_cart(db, session_id)
     db.query(CartItem).filter(CartItem.cart_id == cart.id).delete()
     db.commit()
@@ -233,11 +551,9 @@ def cart_add(
     db: Db,
     http: Http,
     body: CartItemAdd,
-    sid: Sid,
+    customer: CustomerUser,
 ):
-    session_id = _norm_session(sid)
-    if not session_id:
-        return err(400, "SESSION_REQUIRED", "Укажите заголовок X-Session-Id")
+    session_id = customer.id
     product_id, qty = body.product_id, body.quantity
     product = fetch_product(http, product_id)
     if not product or product.get("is_active") is False:
@@ -284,11 +600,9 @@ def cart_update_item(
     item_id: str,
     db: Db,
     body: CartItemQuantity,
-    sid: Sid,
+    customer: CustomerUser,
 ):
-    session_id = _norm_session(sid)
-    if not session_id:
-        return err(400, "SESSION_REQUIRED", "Укажите заголовок X-Session-Id")
+    session_id = customer.id
     qty = body.quantity
     cart = get_or_create_cart(db, session_id)
     item = (
@@ -313,11 +627,9 @@ def cart_update_item(
 def cart_delete_item(
     item_id: str,
     db: Db,
-    sid: Sid,
+    customer: CustomerUser,
 ):
-    session_id = _norm_session(sid)
-    if not session_id:
-        return err(400, "SESSION_REQUIRED", "Укажите заголовок X-Session-Id")
+    session_id = customer.id
     cart = get_or_create_cart(db, session_id)
     item = (
         db.query(CartItem)
@@ -331,16 +643,58 @@ def cart_delete_item(
     return Response(status_code=204)
 
 
+@app.post("/api/v1/cart/merge", tags=["Cart"])
+def cart_merge(
+    db: Db,
+    http: Http,
+    body: CartMergeRequest,
+    customer: CustomerUser,
+):
+    from_sid = _norm_session(body.from_session_id)
+    if not from_sid or from_sid == customer.id:
+        return {"merged_items": 0}
+    from_cart = db.query(Cart).options(selectinload(Cart.items)).filter(Cart.session_id == from_sid).first()
+    if not from_cart or not from_cart.items:
+        return {"merged_items": 0}
+    to_cart = get_or_create_cart(db, customer.id)
+    merged = 0
+    for line in list(from_cart.items):
+        product = fetch_product(http, line.product_id)
+        if not product or product.get("is_active") is False:
+            continue
+        existing = (
+            db.query(CartItem)
+            .filter(CartItem.cart_id == to_cart.id, CartItem.product_id == line.product_id)
+            .first()
+        )
+        if existing:
+            existing.quantity += line.quantity
+            existing.unit_price = product["price"]
+            existing.product_name = product["name"]
+        else:
+            db.add(
+                CartItem(
+                    cart_id=to_cart.id,
+                    product_id=line.product_id,
+                    product_name=product["name"],
+                    quantity=line.quantity,
+                    unit_price=product["price"],
+                )
+            )
+        merged += line.quantity
+    db.query(CartItem).filter(CartItem.cart_id == from_cart.id).delete()
+    db.commit()
+    return {"merged_items": merged}
+
+
 @app.post("/api/v1/orders", tags=["Orders"])
 def orders_create(
     db: Db,
     http: Http,
     body: OrderCreate,
-    sid: Sid,
+    customer: CustomerUser,
 ):
-    session_id = _norm_session(sid)
-    if not session_id:
-        return err(400, "SESSION_REQUIRED", "Укажите заголовок X-Session-Id")
+    session_id = customer.id
     addr = body.delivery_address
 
     cart = get_or_create_cart(db, session_id)
@@ -379,7 +733,6 @@ def orders_create(
         items_with.append({"line": line, "p": p, "unit": unit, "total_price": total_price})
 
     total_amount = round(sum(x["total_price"] for x in items_with), 2)
-    from datetime import datetime
 
     year = datetime.utcnow().year
     prefix = f"ORD-{year}-"
@@ -388,6 +741,7 @@ def orders_create(
 
     order = Order(
         session_id=session_id,
+        user_id=customer.id,
         order_number=order_number,
         status="pending",
         total_amount=total_amount,
@@ -419,20 +773,17 @@ def orders_create(
         new_stock = x["p"]["stock_quantity"] - x["line"].quantity
         patch_stock(http, x["line"].product_id, new_stock)
 
-    return JSONResponse(status_code=201, content=format_order(order))
+    return JSONResponse(status_code=201, content=format_order(db, order))
 
 
 @app.get("/api/v1/orders", tags=["Orders"])
 def orders_list(
     db: Db,
-    sid: Sid,
+    customer: CustomerUser,
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=100),
 ):
-    session_id = _norm_session(sid)
-    if not session_id:
-        return err(400, "SESSION_REQUIRED", "Укажите заголовок X-Session-Id")
-    q = db.query(Order).filter(Order.session_id == session_id)
+    q = db.query(Order).filter(Order.user_id == customer.id)
     total = q.count()
     rows = (
         q.options(selectinload(Order.items))
@@ -447,8 +798,12 @@ def orders_list(
                 "id": o.id,
                 "order_number": o.order_number,
                 "status": o.status,
+                "status_label": _ru_order_status(o.status),
                 "total_amount": o.total_amount,
+                "payment_method": o.payment_method,
+                "payment_method_label": _ru_payment_method(o.payment_method),
                 "payment_status": o.payment_status,
+                "payment_status_label": _ru_payment_status(o.payment_status),
                 "items_count": sum(i.quantity for i in o.items),
                 "created_at": o.created_at.isoformat() if o.created_at else None,
             }
@@ -467,20 +822,17 @@ def orders_list(
 def order_get(
     order_id: str,
     db: Db,
-    sid: Sid,
+    customer: CustomerUser,
 ):
-    session_id = _norm_session(sid)
-    if not session_id:
-        return err(400, "SESSION_REQUIRED", "Укажите заголовок X-Session-Id")
     order = (
         db.query(Order)
         .options(selectinload(Order.items))
-        .filter(Order.id == order_id, Order.session_id == session_id)
+        .filter(Order.id == order_id, Order.user_id == customer.id)
         .first()
     )
     if not order:
         return err(404, "NOT_FOUND", "Заказ не найден")
-    return format_order(order)
+    return format_order(db, order)
 
 
 @app.patch("/api/v1/orders/{order_id}/cancel", tags=["Orders"])
@@ -488,15 +840,12 @@ def order_cancel(
     order_id: str,
     db: Db,
     http: Http,
-    sid: Sid,
+    customer: CustomerUser,
 ):
-    session_id = _norm_session(sid)
-    if not session_id:
-        return err(400, "SESSION_REQUIRED", "Укажите заголовок X-Session-Id")
     order = (
         db.query(Order)
         .options(selectinload(Order.items))
-        .filter(Order.id == order_id, Order.session_id == session_id)
+        .filter(Order.id == order_id, Order.user_id == customer.id)
         .first()
     )
     if not order:
@@ -515,4 +864,234 @@ def order_cancel(
         patch_stock(http, i.product_id, cur + i.quantity)
     db.refresh(order)
     order = db.query(Order).options(selectinload(Order.items)).filter(Order.id == order.id).first()
-    return format_order(order)
+    return format_order(db, order)
+
+
+@app.get("/api/v1/admin/users", tags=["Admin"])
+def admin_users_list(
+    db: Db,
+    _: dict = Depends(require_admin),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    email: str = Query(""),
+):
+    q = db.query(User)
+    if email.strip():
+        q = q.filter(User.email.contains(email.strip()))
+    total = q.count()
+    rows = q.order_by(User.created_at.desc()).offset((page - 1) * limit).limit(limit).all()
+    return {
+        "data": [format_user_row(u) for u in rows],
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "total_pages": max(1, (total + limit - 1) // limit),
+        },
+    }
+
+
+@app.get("/api/v1/admin/users/{user_id}", tags=["Admin"])
+def admin_user_detail(user_id: str, db: Db, _: dict = Depends(require_admin)):
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        return err(404, "NOT_FOUND", "Пользователь не найден")
+    return format_user_row(u)
+
+
+@app.patch("/api/v1/admin/users/{user_id}/block", tags=["Admin"])
+def admin_user_block(user_id: str, db: Db, body: dict, _: dict = Depends(require_admin)):
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        return err(404, "NOT_FOUND", "Пользователь не найден")
+    blocked = body.get("blocked")
+    if not isinstance(blocked, bool):
+        return err(400, "VALIDATION_ERROR", "Поле blocked должно быть boolean")
+    u.is_blocked = blocked
+    db.commit()
+    return format_user_row(u)
+
+
+def _admin_orders_filtered_query(
+    db: Session,
+    status_filter: Optional[str],
+    date_from: Optional[date],
+    date_to: Optional[date],
+    order_number_q: str,
+    customer_q: str = "",
+):
+    q = db.query(Order)
+    if status_filter and status_filter.strip():
+        q = q.filter(Order.status == status_filter.strip())
+    if date_from is not None:
+        q = q.filter(func.date(Order.created_at) >= date_from)
+    if date_to is not None:
+        q = q.filter(func.date(Order.created_at) <= date_to)
+    on = (order_number_q or "").strip()
+    if on:
+        q = q.filter(Order.order_number.contains(on))
+    cq = (customer_q or "").strip()
+    if cq:
+        pat = f"%{cq}%"
+        cust_match = exists().where(
+            User.id == Order.user_id,
+            or_(
+                User.email.ilike(pat),
+                User.first_name.ilike(pat),
+                User.last_name.ilike(pat),
+                User.phone.ilike(pat),
+            ),
+        )
+        q = q.filter(or_(Order.order_number.contains(cq), cust_match))
+    return q
+
+
+def _admin_orders_csv_response(
+    db: Session,
+    status_filter: Optional[str],
+    date_from: Optional[date],
+    date_to: Optional[date],
+    order_number: str,
+    customer_q: str,
+) -> Response:
+    q = _admin_orders_filtered_query(db, status_filter, date_from, date_to, order_number, customer_q)
+    orders = q.options(selectinload(Order.items)).order_by(Order.created_at.desc()).limit(5000).all()
+    user_ids = [o.user_id for o in orders if o.user_id]
+    users_by_id: dict[str, User] = {}
+    if user_ids:
+        for u in db.query(User).filter(User.id.in_(user_ids)).all():
+            users_by_id[u.id] = u
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=";")
+    w.writerow(
+        [
+            "Номер",
+            "Статус",
+            "Создан",
+            "Сумма",
+            "Email клиента",
+            "Клиент ФИО",
+            "Телефон",
+            "Позиции (кратко)",
+        ]
+    )
+    for o in orders:
+        cust = users_by_id.get(o.user_id) if o.user_id else None
+        items_txt = "; ".join(f"{i.product_name} x{i.quantity}" for i in o.items[:8])
+        if len(o.items) > 8:
+            items_txt += " …"
+        w.writerow(
+            [
+                o.order_number,
+                _ru_order_status(o.status),
+                o.created_at.isoformat() if o.created_at else "",
+                str(o.total_amount).replace(".", ","),
+                cust.email if cust else "",
+                customer_display_name(cust) if cust else "",
+                (cust.phone or "") if cust else "",
+                items_txt,
+            ]
+        )
+    payload = "\ufeff" + buf.getvalue()
+    return Response(
+        content=payload.encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="orders_export.csv"'},
+    )
+
+
+@app.get("/api/v1/admin/order-export", tags=["Orders"])
+def admin_order_export_csv(
+    db: Db,
+    _: dict = Depends(require_admin),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    order_number: str = Query("", max_length=40),
+    customer_q: str = Query("", max_length=120),
+):
+    """Выгрузка CSV; путь без «/orders/…», чтобы не пересекаться с /orders/{order_id} на старых деплоях."""
+    return _admin_orders_csv_response(db, status_filter, date_from, date_to, order_number, customer_q)
+
+
+@app.get("/api/v1/admin/orders", tags=["Orders"])
+def admin_orders_list(
+    db: Db,
+    _: dict = Depends(require_admin),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    order_number: str = Query("", max_length=40),
+    customer_q: str = Query("", max_length=120),
+):
+    q = _admin_orders_filtered_query(db, status_filter, date_from, date_to, order_number, customer_q)
+    total = q.count()
+    rows = (
+        q.options(selectinload(Order.items))
+        .order_by(Order.created_at.desc())
+        .offset((page - 1) * limit)
+        .limit(limit)
+        .all()
+    )
+    return {
+        "data": [format_order(db, o, admin=True) for o in rows],
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "total_pages": max(1, (total + limit - 1) // limit),
+        },
+    }
+
+
+@app.get("/api/v1/admin/orders/export", tags=["Orders"])
+@app.get("/api/v1/admin/orders/export.csv", tags=["Orders"])
+def admin_orders_export_csv(
+    db: Db,
+    _: dict = Depends(require_admin),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    order_number: str = Query("", max_length=40),
+    customer_q: str = Query("", max_length=120),
+):
+    return _admin_orders_csv_response(db, status_filter, date_from, date_to, order_number, customer_q)
+
+
+@app.get("/api/v1/admin/orders/{order_id}", tags=["Orders"])
+def admin_order_get(order_id: str, db: Db, _: dict = Depends(require_admin)):
+    order = db.query(Order).options(selectinload(Order.items)).filter(Order.id == order_id).first()
+    if not order:
+        return err(404, "NOT_FOUND", "Заказ не найден")
+    return format_order(db, order, admin=True)
+
+
+@app.patch("/api/v1/admin/orders/{order_id}/status", tags=["Orders"])
+def admin_order_status_update(
+    order_id: str,
+    body: dict,
+    db: Db,
+    http: Http,
+    _: dict = Depends(require_admin),
+):
+    next_status = str(body.get("status", "")).strip().lower()
+    order = db.query(Order).options(selectinload(Order.items)).filter(Order.id == order_id).first()
+    if not order:
+        return err(404, "NOT_FOUND", "Заказ не найден")
+    old = order.status
+    allowed = ALLOWED_STATUS_TRANSITIONS.get(old, set())
+    if next_status not in allowed:
+        return err(
+            400,
+            "INVALID_STATUS_TRANSITION",
+            f"Нельзя перевести заказ из '{old}' в '{next_status}'",
+        )
+    if next_status == "cancelled" and old in {"pending", "confirmed", "processing"}:
+        restore_order_stock(http, order)
+    order.status = next_status
+    db.commit()
+    db.refresh(order)
+    order = db.query(Order).options(selectinload(Order.items)).filter(Order.id == order.id).first()
+    return format_order(db, order, admin=True)

@@ -14,10 +14,12 @@ function Start-LampService {
 Start-LampService (Join-Path $root "product-service") 3001
 Start-Sleep -Milliseconds 400
 Start-LampService (Join-Path $root "order-service") 3002
+Start-Sleep -Milliseconds 400
+Start-LampService (Join-Path $root "admin-service") 3003
 
 $hub = Join-Path $root "dev-hub.html"
 if (Test-Path $hub) {
     Start-Process $hub
 }
 
-Write-Host "Открыт dev-hub.html. Сервисы: http://127.0.0.1:3001/docs и http://127.0.0.1:3002/docs" -ForegroundColor Cyan
+Write-Host "Сервисы: http://127.0.0.1:3001/docs (product), http://127.0.0.1:3002/docs (order), http://127.0.0.1:3003/docs (admin)" -ForegroundColor Cyan

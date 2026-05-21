@@ -1,14 +1,25 @@
+import os
 from typing import Annotated, Any, Optional
 
-from fastapi import Depends, FastAPI, Query
+import jwt
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import JSONResponse, Response
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from .database import Base, SessionLocal, engine
 from .models import Category, Product, ProductImage
-from .schemas import CategoryCreate, CategoryUpdate, ProductCreate, ProductUpdate, StockPatch
+from .slug_sku import ensure_unique_sku, ensure_unique_slug
+from .schemas import (
+    CategoryCreate,
+    CategoryUpdate,
+    ProductCreate,
+    ProductImageCreate,
+    ProductUpdate,
+    StockPatch,
+)
 
 app = FastAPI(
     title="LampShop — Product Service",
@@ -32,7 +43,7 @@ app = FastAPI(
         {"name": "Categories", "description": "Категории: список, товары в категории, CRUD"},
         {
             "name": "Products",
-            "description": "Товары: публичный каталог (GET) и управление без JWT на этом этапе (POST/PUT/PATCH/DELETE)",
+            "description": "Товары: публичный каталог (GET) и админ-операции с Bearer JWT (POST/PUT/PATCH/DELETE, /api/v1/admin/products)",
         },
     ],
     swagger_ui_parameters={
@@ -57,13 +68,29 @@ def get_db():
 
 
 Db = Annotated[Session, Depends(get_db)]
+bearer_auth = HTTPBearer(auto_error=False)
 
-
+JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-prod")
+JWT_ALGORITHM = "HS256"
 def err(status: int, code: str, message: str, details: Any = None) -> JSONResponse:
     body: dict = {"error": {"code": code, "message": message, "status": status}}
     if details is not None:
         body["error"]["details"] = details
     return JSONResponse(status_code=status, content=body)
+
+
+def require_admin(credentials: HTTPAuthorizationCredentials = Depends(bearer_auth)) -> dict:
+    if not credentials or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
+    if payload.get("typ") == "refresh":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Access token required")
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+    return payload
 
 
 def sort_images(product: Product) -> list[ProductImage]:
@@ -89,6 +116,13 @@ def map_list_row(p: Product) -> dict:
         "category": {"id": p.category.id, "name": p.category.name},
         "primary_image": primary,
     }
+
+
+def map_admin_list_row(p: Product) -> dict:
+    row = map_list_row(p)
+    row["is_active"] = p.is_active
+    row["description"] = p.description
+    return row
 
 
 def map_detail(p: Product) -> dict:
@@ -169,7 +203,50 @@ def root():
 
 @app.get("/favicon.ico", tags=["Meta"])
 def favicon():
-    return Response(status_code=204)
+    return Response(status_code=204    )
+
+
+def list_admin_products(
+    db: Session,
+    page: int,
+    limit: int,
+    category_id: Optional[str],
+    sort: str,
+    q: str,
+    include_inactive: bool = False,
+) -> JSONResponse:
+    q_obj = db.query(Product).options(selectinload(Product.category), selectinload(Product.images))
+    if not include_inactive:
+        q_obj = q_obj.filter(Product.is_active.is_(True))
+    if category_id:
+        q_obj = q_obj.filter(Product.category_id == category_id)
+    if q:
+        q_obj = q_obj.filter(Product.name.contains(q))
+    total = q_obj.count()
+    order_by = [Product.created_at.desc()]
+    if sort == "price_asc":
+        order_by = [Product.price.asc()]
+    elif sort == "price_desc":
+        order_by = [Product.price.desc()]
+    elif sort == "name_asc":
+        order_by = [Product.name.asc()]
+    rows = (
+        q_obj.order_by(*order_by)
+        .offset((page - 1) * limit)
+        .limit(limit)
+        .all()
+    )
+    return JSONResponse(
+        {
+            "data": [map_admin_list_row(p) for p in rows],
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "total_pages": max(1, (total + limit - 1) // limit),
+            },
+        }
+    )
 
 
 @app.get("/api/v1/categories", tags=["Categories"])
@@ -201,7 +278,7 @@ def categories_products(
 
 
 @app.post("/api/v1/categories", tags=["Categories"])
-def categories_create(db: Db, body: CategoryCreate):
+def categories_create(db: Db, body: CategoryCreate, _: dict = Depends(require_admin)):
     try:
         c = Category(name=body.name, slug=body.slug, description=body.description)
         db.add(c)
@@ -223,7 +300,7 @@ def categories_create(db: Db, body: CategoryCreate):
 
 
 @app.put("/api/v1/categories/{category_id}", tags=["Categories"])
-def categories_update(category_id: str, db: Db, body: CategoryUpdate):
+def categories_update(category_id: str, db: Db, body: CategoryUpdate, _: dict = Depends(require_admin)):
     c = db.query(Category).filter(Category.id == category_id).first()
     if not c:
         return err(404, "NOT_FOUND", "Категория не найдена")
@@ -239,7 +316,7 @@ def categories_update(category_id: str, db: Db, body: CategoryUpdate):
 
 
 @app.delete("/api/v1/categories/{category_id}", tags=["Categories"])
-def categories_delete(category_id: str, db: Db):
+def categories_delete(category_id: str, db: Db, _: dict = Depends(require_admin)):
     cnt = db.query(Product).filter(Product.category_id == category_id).count()
     if cnt > 0:
         return err(409, "CONFLICT", "Нельзя удалить категорию с привязанными товарами")
@@ -249,6 +326,23 @@ def categories_delete(category_id: str, db: Db):
     db.delete(c)
     db.commit()
     return Response(status_code=204)
+
+
+@app.get("/api/v1/admin/products", tags=["Products"])
+def admin_products_list(
+    db: Db,
+    _: dict = Depends(require_admin),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    category_id: Optional[str] = Query(None),
+    sort: str = Query(""),
+    q: str = Query(""),
+    include_inactive: bool = Query(
+        False,
+        description="Показать товары, снятые с продажи (is_active=false)",
+    ),
+):
+    return list_admin_products(db, page, limit, category_id, sort, q, include_inactive)
 
 
 @app.get("/api/v1/products", tags=["Products"])
@@ -281,7 +375,7 @@ def product_by_id(product_id: str, db: Db):
     p = (
         db.query(Product)
         .options(selectinload(Product.category), selectinload(Product.images))
-        .filter(Product.id == product_id)
+        .filter(Product.id == product_id, Product.is_active.is_(True))
         .first()
     )
     if not p:
@@ -290,17 +384,19 @@ def product_by_id(product_id: str, db: Db):
 
 
 @app.post("/api/v1/products", tags=["Products"])
-def products_create(db: Db, body: ProductCreate):
+def products_create(db: Db, body: ProductCreate, _: dict = Depends(require_admin)):
     if not db.query(Category.id).filter(Category.id == body.category_id).first():
         return err(400, "CATEGORY_NOT_FOUND", "Категория не найдена")
     try:
+        slug = body.slug or ensure_unique_slug(db, body.name)
+        sku = body.sku or ensure_unique_sku(db)
         p = Product(
             category_id=body.category_id,
             name=body.name,
-            slug=body.slug,
+            slug=slug,
             description=body.description,
             price=body.price,
-            sku=body.sku,
+            sku=sku,
             stock_quantity=body.stock_quantity,
             power_watts=body.power_watts,
             base_type=body.base_type,
@@ -327,7 +423,7 @@ def products_create(db: Db, body: ProductCreate):
 
 
 @app.put("/api/v1/products/{product_id}", tags=["Products"])
-def products_update(product_id: str, db: Db, body: ProductUpdate):
+def products_update(product_id: str, db: Db, body: ProductUpdate, _: dict = Depends(require_admin)):
     if not db.query(Category.id).filter(Category.id == body.category_id).first():
         return err(400, "CATEGORY_NOT_FOUND", "Категория не найдена")
     p = (
@@ -360,7 +456,7 @@ def products_update(product_id: str, db: Db, body: ProductUpdate):
 
 
 @app.patch("/api/v1/products/{product_id}/stock", tags=["Products"])
-def products_stock(product_id: str, db: Db, body: StockPatch):
+def products_stock(product_id: str, db: Db, body: StockPatch, _: dict = Depends(require_admin)):
     p = db.query(Product).filter(Product.id == product_id).first()
     if not p:
         return err(404, "PRODUCT_NOT_FOUND", "Товар с указанным ID не найден")
@@ -370,10 +466,44 @@ def products_stock(product_id: str, db: Db, body: StockPatch):
 
 
 @app.delete("/api/v1/products/{product_id}", tags=["Products"])
-def products_delete(product_id: str, db: Db):
+def products_delete(product_id: str, db: Db, _: dict = Depends(require_admin)):
     p = db.query(Product).filter(Product.id == product_id).first()
     if not p:
         return err(404, "PRODUCT_NOT_FOUND", "Товар с указанным ID не найден")
-    p.is_active = False
+    db.query(ProductImage).filter(ProductImage.product_id == product_id).delete(synchronize_session=False)
+    db.delete(p)
     db.commit()
     return Response(status_code=204)
+
+
+@app.post("/api/v1/products/{product_id}/images", tags=["Products"])
+def products_add_image(product_id: str, db: Db, body: ProductImageCreate, _: dict = Depends(require_admin)):
+    p = db.query(Product).filter(Product.id == product_id).first()
+    if not p:
+        return err(404, "PRODUCT_NOT_FOUND", "Товар с указанным ID не найден")
+    if body.is_primary:
+        db.query(ProductImage).filter(ProductImage.product_id == product_id).delete(
+            synchronize_session=False
+        )
+        db.flush()
+    img = ProductImage(
+        product_id=p.id,
+        url=body.url,
+        alt_text=body.alt_text,
+        is_primary=body.is_primary,
+        sort_order=body.sort_order,
+    )
+    db.add(img)
+    db.commit()
+    db.refresh(img)
+    return JSONResponse(
+        status_code=201,
+        content={
+            "id": img.id,
+            "product_id": p.id,
+            "url": img.url,
+            "alt_text": img.alt_text,
+            "is_primary": img.is_primary,
+            "sort_order": img.sort_order,
+        },
+    )

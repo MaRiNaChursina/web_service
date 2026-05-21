@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import relationship
 
 from .database import Base
@@ -8,6 +8,20 @@ from .database import Base
 
 def new_id() -> str:
     return str(uuid.uuid4())
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(String, primary_key=True, default=new_id)
+    email = Column(String(255), unique=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    first_name = Column(String(100), nullable=True)
+    last_name = Column(String(100), nullable=True)
+    phone = Column(String(20), nullable=True)
+    role = Column(String(20), nullable=False, default="customer")
+    is_blocked = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, server_default=func.now())
 
 
 class Cart(Base):
@@ -38,6 +52,7 @@ class Order(Base):
 
     id = Column(String, primary_key=True, default=new_id)
     session_id = Column(String(100), nullable=False)
+    user_id = Column(String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     order_number = Column(String(20), unique=True, nullable=False)
     status = Column(String(30), nullable=False, default="pending")
     total_amount = Column(Float, nullable=False)
