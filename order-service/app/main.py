@@ -17,8 +17,18 @@ from sqlalchemy import exists, func, or_
 from sqlalchemy.orm import Session, selectinload
 
 from .database import Base, SessionLocal, engine
-from .models import Cart, CartItem, Order, OrderItem, User
-from .schemas import CartItemAdd, CartItemQuantity, CartMergeRequest, CustomerLogin, CustomerRegister, OrderCreate
+from .models import Cart, CartItem, Order, OrderItem, ProductFavorite, ProductReview, User
+from .schemas import (
+    CartItemAdd,
+    CartItemQuantity,
+    CartMergeRequest,
+    CustomerLogin,
+    CustomerRegister,
+    FavoriteAdd,
+    OrderCreate,
+    ProductReviewCreate,
+    ProductReviewUpdate,
+)
 
 PRODUCT_URL = os.getenv("PRODUCT_SERVICE_URL", "http://localhost:3001").rstrip("/")
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-prod")
@@ -180,6 +190,8 @@ app = FastAPI(
         {"name": "Cart", "description": "Корзина: просмотр, позиции, очистка"},
         {"name": "Orders", "description": "Оформление и просмотр заказов"},
         {"name": "Admin", "description": "Администрирование пользователей и заказов (JWT администратора)"},
+        {"name": "Reviews", "description": "Отзывы и средний рейтинг товаров"},
+        {"name": "Favorites", "description": "Избранные товары покупателя (JWT)"},
     ],
     swagger_ui_parameters={
         "tryItOutEnabled": True,
@@ -491,6 +503,225 @@ def auth_refresh(body: dict, db: Db):
     if not u or u.is_blocked:
         return err(401, "UNAUTHORIZED", "Пользователь не найден")
     return customer_auth_response(u)
+
+
+def review_author_name(u: User) -> str:
+    name = customer_display_name(u)
+    return name if name else "Покупатель"
+
+
+def map_review_public(r: ProductReview, u: User) -> dict:
+    return {
+        "id": r.id,
+        "product_id": r.product_id,
+        "rating": r.rating,
+        "text": r.text or "",
+        "author_name": review_author_name(u),
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+    }
+
+
+def map_review_mine(r: ProductReview) -> dict:
+    return {
+        "id": r.id,
+        "product_id": r.product_id,
+        "rating": r.rating,
+        "text": r.text or "",
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+    }
+
+
+def rating_stats_for_products(db: Session, product_ids: list[str]) -> dict[str, dict]:
+    if not product_ids:
+        return {}
+    rows = (
+        db.query(
+            ProductReview.product_id,
+            func.avg(ProductReview.rating),
+            func.count(ProductReview.id),
+        )
+        .filter(ProductReview.product_id.in_(product_ids))
+        .group_by(ProductReview.product_id)
+        .all()
+    )
+    out: dict[str, dict] = {}
+    for pid, avg, cnt in rows:
+        out[str(pid)] = {
+            "average_rating": round(float(avg or 0), 1),
+            "review_count": int(cnt or 0),
+        }
+    for pid in product_ids:
+        out.setdefault(str(pid), {"average_rating": 0.0, "review_count": 0})
+    return out
+
+
+@app.get("/api/v1/products/ratings", tags=["Reviews"])
+def products_ratings_batch(
+    db: Db,
+    ids: str = Query("", description="ID товаров через запятую"),
+):
+    product_ids = [x.strip() for x in ids.split(",") if x.strip()]
+    if len(product_ids) > 200:
+        return err(400, "VALIDATION_ERROR", "Не более 200 ID за запрос")
+    return {"data": rating_stats_for_products(db, product_ids)}
+
+
+@app.get("/api/v1/products/{product_id}/reviews/summary", tags=["Reviews"])
+def product_review_summary(product_id: str, db: Db):
+    stats = rating_stats_for_products(db, [product_id])
+    return stats.get(product_id, {"average_rating": 0.0, "review_count": 0})
+
+
+@app.get("/api/v1/products/{product_id}/reviews", tags=["Reviews"])
+def product_reviews_list(
+    product_id: str,
+    db: Db,
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=50),
+):
+    q = (
+        db.query(ProductReview, User)
+        .join(User, User.id == ProductReview.user_id)
+        .filter(ProductReview.product_id == product_id)
+        .order_by(ProductReview.created_at.desc())
+    )
+    total = q.count()
+    rows = q.offset((page - 1) * limit).limit(limit).all()
+    return {
+        "data": [map_review_public(r, u) for r, u in rows],
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "total_pages": max(1, (total + limit - 1) // limit),
+        },
+    }
+
+
+@app.get("/api/v1/products/{product_id}/reviews/me", tags=["Reviews"])
+def product_review_mine(
+    product_id: str,
+    db: Db,
+    customer: Annotated[Optional[User], Depends(optional_customer)],
+):
+    if not customer:
+        return {"review": None}
+    r = (
+        db.query(ProductReview)
+        .filter(ProductReview.product_id == product_id, ProductReview.user_id == customer.id)
+        .first()
+    )
+    return {"review": map_review_mine(r) if r else None}
+
+
+@app.post("/api/v1/products/{product_id}/reviews", tags=["Reviews"])
+def product_review_create(
+    product_id: str,
+    db: Db,
+    http: Http,
+    body: ProductReviewCreate,
+    customer: CustomerUser,
+):
+    existing = (
+        db.query(ProductReview)
+        .filter(ProductReview.product_id == product_id, ProductReview.user_id == customer.id)
+        .first()
+    )
+    if existing:
+        return err(
+            409,
+            "REVIEW_EXISTS",
+            "Вы уже оставляли отзыв на этот товар. Измените или удалите существующий.",
+        )
+    product = fetch_product(http, product_id)
+    if not product or product.get("is_active") is False:
+        return err(404, "PRODUCT_NOT_FOUND", "Товар не найден в каталоге")
+    r = ProductReview(
+        user_id=customer.id,
+        product_id=product_id,
+        rating=body.rating,
+        text=(body.text or "").strip() or None,
+    )
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+    return JSONResponse(status_code=201, content={"review": map_review_mine(r)})
+
+
+@app.put("/api/v1/products/{product_id}/reviews/me", tags=["Reviews"])
+def product_review_update(
+    product_id: str,
+    db: Db,
+    body: ProductReviewUpdate,
+    customer: CustomerUser,
+):
+    r = (
+        db.query(ProductReview)
+        .filter(ProductReview.product_id == product_id, ProductReview.user_id == customer.id)
+        .first()
+    )
+    if not r:
+        return err(404, "REVIEW_NOT_FOUND", "Отзыв не найден. Сначала оставьте отзыв.")
+    r.rating = body.rating
+    r.text = (body.text or "").strip() or None
+    db.commit()
+    db.refresh(r)
+    return {"review": map_review_mine(r)}
+
+
+@app.delete("/api/v1/products/{product_id}/reviews/me", tags=["Reviews"])
+def product_review_delete(product_id: str, db: Db, customer: CustomerUser):
+    r = (
+        db.query(ProductReview)
+        .filter(ProductReview.product_id == product_id, ProductReview.user_id == customer.id)
+        .first()
+    )
+    if not r:
+        return err(404, "REVIEW_NOT_FOUND", "Отзыв не найден")
+    db.delete(r)
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.get("/api/v1/favorites", tags=["Favorites"])
+def favorites_list(db: Db, customer: CustomerUser):
+    rows = (
+        db.query(ProductFavorite.product_id)
+        .filter(ProductFavorite.user_id == customer.id)
+        .order_by(ProductFavorite.created_at.desc())
+        .all()
+    )
+    return {"product_ids": [r[0] for r in rows]}
+
+
+@app.post("/api/v1/favorites", tags=["Favorites"])
+def favorites_add(db: Db, http: Http, body: FavoriteAdd, customer: CustomerUser):
+    product_id = body.product_id.strip()
+    product = fetch_product(http, product_id)
+    if not product or product.get("is_active") is False:
+        return err(404, "PRODUCT_NOT_FOUND", "Товар не найден в каталоге")
+    existing = (
+        db.query(ProductFavorite)
+        .filter(ProductFavorite.user_id == customer.id, ProductFavorite.product_id == product_id)
+        .first()
+    )
+    if existing:
+        return {"product_id": product_id, "is_favorite": True}
+    db.add(ProductFavorite(user_id=customer.id, product_id=product_id))
+    db.commit()
+    return JSONResponse(status_code=201, content={"product_id": product_id, "is_favorite": True})
+
+
+@app.delete("/api/v1/favorites/{product_id}", tags=["Favorites"])
+def favorites_remove(product_id: str, db: Db, customer: CustomerUser):
+    db.query(ProductFavorite).filter(
+        ProductFavorite.user_id == customer.id,
+        ProductFavorite.product_id == product_id,
+    ).delete(synchronize_session=False)
+    db.commit()
+    return Response(status_code=204)
 
 
 @app.get("/", tags=["Meta"])

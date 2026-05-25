@@ -77,3 +77,28 @@ class OrderItem(Base):
     quantity = Column(Integer, nullable=False)
     unit_price = Column(Float, nullable=False)
     total_price = Column(Float, nullable=False)
+
+
+class ProductReview(Base):
+    __tablename__ = "product_reviews"
+    __table_args__ = (UniqueConstraint("user_id", "product_id", name="uq_review_user_product"),)
+
+    id = Column(String, primary_key=True, default=new_id)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user = relationship("User")
+    product_id = Column(String, nullable=False, index=True)
+    rating = Column(Integer, nullable=False)
+    text = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class ProductFavorite(Base):
+    __tablename__ = "product_favorites"
+    __table_args__ = (UniqueConstraint("user_id", "product_id", name="uq_favorite_user_product"),)
+
+    id = Column(String, primary_key=True, default=new_id)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user = relationship("User")
+    product_id = Column(String, nullable=False, index=True)
+    created_at = Column(DateTime, server_default=func.now())

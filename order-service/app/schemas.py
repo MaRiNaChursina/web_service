@@ -115,3 +115,27 @@ class OrderCreate(BaseModel):
     delivery_address: DeliveryAddress
     payment_method: Literal["sbp", "card", "cash"]
     notes: Optional[str] = None
+
+
+class ProductReviewCreate(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"rating": 5, "text": "Отличная лампа, свет мягкий."}}
+    )
+
+    rating: int = Field(..., ge=1, le=5)
+    text: Optional[str] = Field(None, max_length=2000)
+
+
+class ProductReviewUpdate(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"rating": 4, "text": "Обновлённый отзыв."}}
+    )
+
+    rating: int = Field(..., ge=1, le=5)
+    text: Optional[str] = Field(None, max_length=2000)
+
+
+class FavoriteAdd(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"product_id": "uuid-товара"}})
+
+    product_id: str = Field(..., min_length=1, max_length=64)
